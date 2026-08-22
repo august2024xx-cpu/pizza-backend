@@ -20,6 +20,15 @@ const PORT = process.env.PORT || 10000;
 
 
 /* =========================================================
+   NOWPAYMENTS CONFIGURATION (NEW ACCOUNT CREDENTIALS)
+   ========================================================= */
+
+const NOWPAYMENTS_API_KEY = "65WB5AF-QMH42A0-H3759DC-9W6TJDN";
+const NOWPAYMENTS_PUBLIC_KEY = "bba1005a-eda6-4045-a35c-181beaef8359";
+const NOWPAYMENTS_IPN_SECRET = "1YH5ZQc5pvYDhTvSZgCkT5pLn9KLwuhS";
+
+
+/* =========================================================
    NETWORK
    ========================================================= */
 
@@ -104,7 +113,7 @@ function normalizeAddress(address) {
 
 function verifyNowPaymentsSignature(req) {
   const receivedSig = req.headers["x-nowpayments-sig"];
-  const ipnsSecret = process.env.NOWPAYMENTS_IPN_SECRET;
+  const ipnsSecret = NOWPAYMENTS_IPN_SECRET;
 
   if (!receivedSig || !ipnsSecret) {
     return false;
@@ -135,7 +144,7 @@ function verifyNowPaymentsSignature(req) {
 
 
 /* =========================================================
-   REQUIRED ENVIRONMENT VARIABLES (Direct Web3)
+   REQUIRED ENVIRONMENT VARIABLES
    ========================================================= */
 
 function checkEnvironment() {
@@ -243,7 +252,7 @@ app.get(
   "/",
   (req, res) => {
     res.status(200).send(
-      "Pizza Coin Backend (Dual Mode) is running successfully!"
+      "Pizza Coin Dual Backend is running successfully!"
     );
   }
 );
@@ -434,10 +443,6 @@ app.post(
       console.log("==================================================");
       console.log("NOWPAYMENTS IPN WEBHOOK RECEIVED");
       console.log("==================================================");
-
-      if (!process.env.NOWPAYMENTS_IPN_SECRET) {
-        throw new Error("NOWPAYMENTS_IPN_SECRET is missing from environment.");
-      }
 
       if (!verifyNowPaymentsSignature(req)) {
         console.warn("Invalid NOWPayments IPN signature.");
