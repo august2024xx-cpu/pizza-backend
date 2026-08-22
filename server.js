@@ -230,6 +230,7 @@ app.get(
         chainId: network.chainId.toString(),
         routes: [
           "/api/verify-usdc-order",
+          "/api/create-nowpayments-invoice",
           "/api/nowpayments-ipn"
         ]
       });
@@ -431,14 +432,61 @@ app.post(
 
 
 /* =========================================================
-   ROUTE 2: NOWPAYMENTS WEBHOOK IPN (/api/nowpayments-ipn)
+   ROUTE 2: NOWPAYMENTS INVOICE CREATION & IPN WEBHOOK
    ========================================================= */
+
+app.post(
+  "/api/create-nowpayments-invoice",
+  async (req, res) => {
+    try {
+      checkEnvironment();
+
+      const { email, polygonAddress, pzzcAmount } = req.body;
+
+      if (!isValidEmail(email)) {
+        return res.status(400).json({ success: false, error: "Invalid buyer email address." });
+      }
+      if (!isValidAddress(polygonAddress)) {
+        return res.status(400).json({ success: false, error: "Invalid Polygon receive address." });
+      }
+
+      const amount = Number(pzzcAmount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return res.status(400).json({ success: false, error: "Amount must be greater than zero." });
+      }
+
+      const response = await fetch("https://api.nowpayments.io/v1/invoice", {
+        method: "POST",
+        headers: {
+          "x-api-key": NOWPAYMENTS_API_KEY,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          price_amount: amount,
+          price_currency: "usd",
+          pay_currency: "btc",
+          ipn_callback_url: "https://pizza-backend-8if7.onrender.com/api/nowpayments-ipn",
+          order_id: `PZZC-${Date.now()}`,
+          order_description: `Wallet: ${polygonAddress} | Email: ${email}`
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to create NOWPayments invoice.");
+      }
+
+      return res.status(200).json({ success: true, invoice_url: data.invoice_url });
+    } catch (error) {
+      console.error("NOWPayments Invoice Creation Error:", error);
+      return res.status(500).json({ success: false, error: error.message || "Invoice creation failed." });
+    }
+  }
+);
 
 app.post(
   "/api/nowpayments-ipn",
   async (req, res) => {
-    let paymentId = null;
-
     try {
       console.log("==================================================");
       console.log("NOWPAYMENTS IPN WEBHOOK RECEIVED");
@@ -450,8 +498,8 @@ app.post(
       }
 
       const ipnData = req.body;
-      paymentId = ipnData.payment_id;
-      const paymentStatus = ipnData.payment_status;
+      const paymentId = ipnData.payment_id || ipnData.invoice_id;
+      const paymentStatus = ipnData.payment_status || ipnData.status;
       const priceAmount = ipnData.price_amount;
       const orderDescription = ipnData.order_description || "";
       const payCurrency = ipnData.pay_currency || "crypto";
@@ -476,8 +524,6 @@ app.post(
         return res.status(400).json({ success: false, error: "Invalid metadata payload." });
       }
 
-      const requestedPzzc = String(priceAmount);
-
       const existingOrder = processedOrders.get(String(paymentId));
       if (existingOrder) {
         return res.status(200).json({ success: true, message: "Payment already processed." });
@@ -489,7 +535,7 @@ app.post(
       const pzzcContract = new ethers.Contract(process.env.STMP_PZZC, ERC20_ABI, distributionWallet);
       const pzzcDecimals = await pzzcContract.decimals();
       const pzzcSymbol = await pzzcContract.symbol();
-      const pzzcUnits = ethers.parseUnits(requestedPzzc, pzzcDecimals);
+      const pzzcUnits = ethers.parseUnits(String(priceAmount), pzzcDecimals);
 
       const pzzcTransferTx = await pzzcContract.transfer(buyerAddress, pzzcUnits);
       await pzzcTransferTx.wait();
@@ -497,7 +543,7 @@ app.post(
       const brevo = getBrevoClient();
       await brevo.transactionalEmails.sendTransacEmail({
         subject: "🍕 Your Pizza Coin Order Confirmation",
-        htmlContent: `<p>Paid $${priceAmount} USD via NOWPayments (${payCurrency}). Sent ${requestedPzzc} ${pzzcSymbol}.</p>`,
+        htmlContent: `<p>Paid $${priceAmount} USD via NOWPayments (${payCurrency}). Sent ${priceAmount} ${pzzcSymbol}.</p>`,
         sender: { name: "Pizza Coin", email: process.env.SENDER_EMAIL },
         to: [{ email: buyerEmail }]
       });
