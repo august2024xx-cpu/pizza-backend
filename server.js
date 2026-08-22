@@ -26,6 +26,7 @@ const PORT = process.env.PORT || 10000;
 const NOWPAYMENTS_API_KEY = "65WB5AF-QMH42A0-H3759DC-9W6TJDN";
 const NOWPAYMENTS_PUBLIC_KEY = "bba1005a-eda6-4045-a35c-181beaef8359";
 const NOWPAYMENTS_IPN_SECRET = "1YH5ZQc5pvYDhTvSZgCkT5pLn9KLwuhS";
+const NOWPAYMENTS_API_URL = "https://api.nowpayments.io/v1";
 
 
 /* =========================================================
@@ -432,7 +433,7 @@ app.post(
 
 
 /* =========================================================
-   ROUTE 2: NOWPAYMENTS INVOICE CREATION & IPN WEBHOOK
+   ROUTE 2: NOWPAYMENTS DYNAMIC INVOICE & IPN WEBHOOK
    ========================================================= */
 
 app.post(
@@ -455,7 +456,8 @@ app.post(
         return res.status(400).json({ success: false, error: "Amount must be greater than zero." });
       }
 
-      const response = await fetch("https://api.nowpayments.io/v1/invoice", {
+      // Call NOWPayments API to create a flexible multi-currency invoice (omitting pay_currency)
+      const response = await fetch(`${NOWPAYMENTS_API_URL}/invoice`, {
         method: "POST",
         headers: {
           "x-api-key": NOWPAYMENTS_API_KEY,
@@ -464,7 +466,6 @@ app.post(
         body: JSON.stringify({
           price_amount: amount,
           price_currency: "usd",
-          pay_currency: "btc",
           ipn_callback_url: "https://pizza-backend-8if7.onrender.com/api/nowpayments-ipn",
           order_id: `PZZC-${Date.now()}`,
           order_description: `Wallet: ${polygonAddress} | Email: ${email}`
