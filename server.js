@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
+const crypto = require("crypto");
 const { ethers } = require("ethers");
 const { BrevoClient } = require("@getbrevo/brevo");
 
@@ -13,7 +14,6 @@ dotenv.config();
 const app = express();
 
 app.use(cors());
-
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
@@ -64,7 +64,7 @@ const ERC20_ABI = [
 
 
 /* =========================================================
-   USDC CONTRACT
+   USDC CONTRACT (For Direct Web3 Route)
    ========================================================= */
 
 const usdcContract =
@@ -80,38 +80,65 @@ const usdcContract =
    ========================================================= */
 
 function isValidEmail(email) {
-
   return (
     typeof email === "string" &&
     /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
   );
-
 }
 
-
 function isValidAddress(address) {
-
   return (
     typeof address === "string" &&
     ethers.isAddress(address)
   );
-
 }
 
-
 function normalizeAddress(address) {
-
   return ethers.getAddress(address);
-
 }
 
 
 /* =========================================================
-   REQUIRED ENVIRONMENT VARIABLES
+   NOWPAYMENTS SIGNATURE VERIFICATION
+   ========================================================= */
+
+function verifyNowPaymentsSignature(req) {
+  const receivedSig = req.headers["x-nowpayments-sig"];
+  const ipnsSecret = process.env.NOWPAYMENTS_IPN_SECRET;
+
+  if (!receivedSig || !ipnsSecret) {
+    return false;
+  }
+
+  function sortObject(obj) {
+    if (obj === null || typeof obj !== "object") {
+      return obj;
+    }
+    if (Array.isArray(obj)) {
+      return obj.map(sortObject);
+    }
+    return Object.keys(obj)
+      .sort()
+      .reduce((sorted, key) => {
+        sorted[key] = sortObject(obj[key]);
+        return sorted;
+      }, {});
+  }
+
+  const sortedPayload = sortObject(req.body);
+  const hmac = crypto.createHmac("sha512", ipnsSecret);
+  hmac.update(JSON.stringify(sortedPayload));
+  const calculatedSig = hmac.digest("hex");
+
+  return calculatedSig === receivedSig;
+}
+
+
+/* =========================================================
+   REQUIRED ENVIRONMENT VARIABLES (Direct Web3)
    ========================================================= */
 
 function checkEnvironment() {
-
   const required = [
     "STMP_B3",
     "STMP_PZZC",
@@ -126,13 +153,10 @@ function checkEnvironment() {
     );
 
   if (missing.length > 0) {
-
     throw new Error(
       `Missing Render environment variables: ${missing.join(", ")}`
     );
-
   }
-
 }
 
 
@@ -141,20 +165,16 @@ function checkEnvironment() {
    ========================================================= */
 
 function getDistributionWallet() {
-
   if (!process.env.STMP_B3) {
-
     throw new Error(
       "STMP_B3 private key is missing."
     );
-
   }
 
   return new ethers.Wallet(
     process.env.STMP_B3,
     provider
   );
-
 }
 
 
@@ -163,40 +183,25 @@ function getDistributionWallet() {
    ========================================================= */
 
 function getBrevoClient() {
-
   if (!process.env.BREVO_API_KEY) {
-
     throw new Error(
       "BREVO_API_KEY is missing."
     );
-
   }
 
   return new BrevoClient({
-    apiKey:
-      process.env.BREVO_API_KEY,
-
+    apiKey: process.env.BREVO_API_KEY,
     timeoutInSeconds: 30,
-
     maxRetries: 3
   });
-
 }
 
 
 /* =========================================================
    IN-MEMORY ORDER LOCK
-   =========================================================
-
-   Prevents the same txHash from being processed twice
-   while this server instance remains alive.
-
-   A production database is recommended for permanent
-   idempotency across server restarts.
    ========================================================= */
 
-const processedOrders =
-  new Map();
+const processedOrders = new Map();
 
 
 /* =========================================================
@@ -206,48 +211,26 @@ const processedOrders =
 app.get(
   "/api/health",
   async (req, res) => {
-
     try {
-
-      const network =
-        await provider.getNetwork();
+      const network = await provider.getNetwork();
 
       res.status(200).json({
-
         success: true,
-
-        service:
-          "pizza-backend",
-
-        network:
-          "polygon",
-
-        chainId:
-          network.chainId.toString(),
-
-        orderRoute:
-          "/api/verify-usdc-order"
-
+        service: "pizza-backend",
+        network: "polygon",
+        chainId: network.chainId.toString(),
+        routes: [
+          "/api/verify-usdc-order",
+          "/api/nowpayments-ipn"
+        ]
       });
-
     } catch (error) {
-
-      console.error(
-        "Health check error:",
-        error
-      );
-
+      console.error("Health check error:", error);
       res.status(500).json({
-
         success: false,
-
-        error:
-          error.message
-
+        error: error.message
       });
-
     }
-
   }
 );
 
@@ -259,50 +242,28 @@ app.get(
 app.get(
   "/",
   (req, res) => {
-
     res.status(200).send(
-      "Pizza Coin Backend is running successfully!"
+      "Pizza Coin Backend (Dual Mode) is running successfully!"
     );
-
   }
 );
 
 
 /* =========================================================
-   ORDER ROUTE
+   ROUTE 1: DIRECT WEB3 USDC ORDER (/api/verify-usdc-order)
    ========================================================= */
 
 app.post(
   "/api/verify-usdc-order",
   async (req, res) => {
-
     let txHash = null;
 
     try {
-
-      console.log(
-        "=================================================="
-      );
-
-      console.log(
-        "VERIFY USDC ORDER REQUEST"
-      );
-
-      console.log(
-        "=================================================="
-      );
-
-
-      /* ===================================================
-         ENVIRONMENT
-         =================================================== */
+      console.log("==================================================");
+      console.log("VERIFY USDC ORDER REQUEST (DIRECT WEB3)");
+      console.log("==================================================");
 
       checkEnvironment();
-
-
-      /* ===================================================
-         REQUEST DATA
-         =================================================== */
 
       const {
         email,
@@ -312,1131 +273,268 @@ app.post(
         txHash: submittedTxHash
       } = req.body;
 
-
       txHash = submittedTxHash;
 
-
-      console.log(
-        "Buyer email:",
-        email
-      );
-
-      console.log(
-        "Buyer receive address:",
-        polygonAddress
-      );
-
-      console.log(
-        "Requested PZZC:",
-        pzzcAmount
-      );
-
-      console.log(
-        "Payment crypto:",
-        paymentCrypto
-      );
-
-      console.log(
-        "Payment TX:",
-        txHash
-      );
-
-
-      /* ===================================================
-         INPUT VALIDATION
-         =================================================== */
-
       if (!isValidEmail(email)) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "Invalid buyer email address."
-
-        });
-
+        return res.status(400).json({ success: false, error: "Invalid buyer email address." });
       }
-
-
       if (!isValidAddress(polygonAddress)) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "Invalid Polygon receive address."
-
-        });
-
+        return res.status(400).json({ success: false, error: "Invalid Polygon receive address." });
       }
 
+      const requestedPzzc = String(pzzcAmount);
+      let numericPzzc = Number(requestedPzzc);
 
-      if (
-        typeof pzzcAmount !== "string" &&
-        typeof pzzcAmount !== "number"
-      ) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "Invalid PZZC amount."
-
-        });
-
+      if (!Number.isFinite(numericPzzc) || numericPzzc <= 0) {
+        return res.status(400).json({ success: false, error: "PZZC amount must be greater than zero." });
       }
 
-
-      const requestedPzzc =
-        String(pzzcAmount);
-
-
-      let numericPzzc;
-
-      try {
-
-        numericPzzc =
-          Number(requestedPzzc);
-
-      } catch {
-
-        numericPzzc =
-          NaN;
-
+      if (paymentCrypto && paymentCrypto !== "USDC") {
+        return res.status(400).json({ success: false, error: "Only USDC payments are currently supported." });
       }
 
-
-      if (
-        !Number.isFinite(numericPzzc) ||
-        numericPzzc <= 0
-      ) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "PZZC amount must be greater than zero."
-
-        });
-
+      if (typeof txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+        return res.status(400).json({ success: false, error: "Invalid Polygon transaction hash." });
       }
 
+      const buyerAddress = normalizeAddress(polygonAddress);
+      const merchantAddress = normalizeAddress(MERCHANT_WALLET);
 
-      if (
-        paymentCrypto &&
-        paymentCrypto !== "USDC"
-      ) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "Only USDC payments are currently supported."
-
-        });
-
-      }
-
-
-      if (
-        typeof txHash !== "string" ||
-        !/^0x[0-9a-fA-F]{64}$/.test(txHash)
-      ) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "Invalid Polygon transaction hash."
-
-        });
-
-      }
-
-
-      /* ===================================================
-         NORMALIZE ADDRESSES
-         =================================================== */
-
-      const buyerAddress =
-        normalizeAddress(
-          polygonAddress
-        );
-
-      const merchantAddress =
-        normalizeAddress(
-          MERCHANT_WALLET
-        );
-
-
-      /* ===================================================
-         DUPLICATE ORDER CHECK
-         =================================================== */
-
-      const existingOrder =
-        processedOrders.get(txHash);
-
+      // Duplicate Check
+      const existingOrder = processedOrders.get(txHash);
       if (existingOrder) {
-
-        console.log(
-          "Duplicate txHash request:",
-          txHash
-        );
-
         return res.status(200).json({
-
-          success:
-            existingOrder.success,
-
-          message:
-            "This transaction has already been processed.",
-
-          paymentTxHash:
-            txHash,
-
-          pzzcTxHash:
-            existingOrder.pzzcTxHash || null,
-
-          buyerEmailSent:
-            existingOrder.buyerEmailSent || false,
-
-          sellerEmailSent:
-            existingOrder.sellerEmailSent || false
-
+          success: existingOrder.success,
+          message: "This transaction has already been processed.",
+          paymentTxHash: txHash,
+          pzzcTxHash: existingOrder.pzzcTxHash || null
         });
-
       }
 
-
-      /* ===================================================
-         VERIFY POLYGON NETWORK
-         =================================================== */
-
-      const network =
-        await provider.getNetwork();
-
-      if (
-        network.chainId !==
-        POLYGON_CHAIN_ID
-      ) {
-
-        throw new Error(
-          `RPC is not connected to Polygon. Chain ID: ${network.chainId}`
-        );
-
+      const network = await provider.getNetwork();
+      if (network.chainId !== POLYGON_CHAIN_ID) {
+        throw new Error(`RPC is not connected to Polygon. Chain ID: ${network.chainId}`);
       }
 
-
-      console.log(
-        "Polygon network verified."
-      );
-
-
-      /* ===================================================
-         GET TRANSACTION
-         =================================================== */
-
-      const transaction =
-        await provider.getTransaction(
-          txHash
-        );
-
-
-      if (!transaction) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "Payment transaction was not found on Polygon."
-
-        });
-
+      const transaction = await provider.getTransaction(txHash);
+      if (!transaction || !transaction.to) {
+        return res.status(400).json({ success: false, error: "Payment transaction was not found." });
       }
 
-
-      console.log(
-        "Transaction found."
-      );
-
-
-      /* ===================================================
-         VERIFY TRANSACTION TO CONTRACT
-         =================================================== */
-
-      if (!transaction.to) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "Payment transaction has no destination."
-
-        });
-
+      if (normalizeAddress(transaction.to).toLowerCase() !== USDC_ADDRESS.toLowerCase()) {
+        return res.status(400).json({ success: false, error: "Transaction was not sent to USDC contract." });
       }
 
-
-      const transactionTo =
-        normalizeAddress(
-          transaction.to
-        );
-
-
-      if (
-        transactionTo.toLowerCase() !==
-        USDC_ADDRESS.toLowerCase()
-      ) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "Transaction was not sent to the configured Polygon USDC contract."
-
-        });
-
+      const receipt = await provider.getTransactionReceipt(txHash);
+      if (!receipt || receipt.status !== 1) {
+        return res.status(400).json({ success: false, error: "Payment transaction failed on Polygon." });
       }
 
-
-      /* ===================================================
-         VERIFY RECEIPT
-         =================================================== */
-
-      const receipt =
-        await provider.getTransactionReceipt(
-          txHash
-        );
-
-
-      if (!receipt) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "Payment transaction has not been mined yet."
-
-        });
-
-      }
-
-
-      if (
-        receipt.status !== 1
-      ) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "USDC payment transaction failed on Polygon."
-
-        });
-
-      }
-
-
-      console.log(
-        "Payment transaction confirmed."
-      );
-
-
-      /* ===================================================
-         PARSE USDC TRANSFER EVENTS
-         =================================================== */
-
-      const usdcInterface =
-        new ethers.Interface(
-          ERC20_ABI
-        );
-
-
+      // Parse USDC logs
+      const usdcInterface = new ethers.Interface(ERC20_ABI);
       let verifiedPayment = null;
 
-
-      for (
-        const log of receipt.logs
-      ) {
-
-        if (
-          log.address.toLowerCase() !==
-          USDC_ADDRESS.toLowerCase()
-        ) {
-
-          continue;
-
-        }
-
-
+      for (const log of receipt.logs) {
+        if (log.address.toLowerCase() !== USDC_ADDRESS.toLowerCase()) continue;
         try {
+          const parsed = usdcInterface.parseLog({ topics: log.topics, data: log.data });
+          if (!parsed || parsed.name !== "Transfer") continue;
 
-          const parsed =
-            usdcInterface.parseLog({
-              topics:
-                log.topics,
-              data:
-                log.data
-            });
+          const from = normalizeAddress(parsed.args[0]);
+          const to = normalizeAddress(parsed.args[1]);
+          const value = parsed.args[2];
 
-
-          if (
-            !parsed ||
-            parsed.name !==
-            "Transfer"
-          ) {
-
-            continue;
-
-          }
-
-
-          const from =
-            normalizeAddress(
-              parsed.args[0]
-            );
-
-          const to =
-            normalizeAddress(
-              parsed.args[1]
-            );
-
-          const value =
-            parsed.args[2];
-
-
-          if (
-            to.toLowerCase() ===
-            merchantAddress.toLowerCase()
-          ) {
-
-            verifiedPayment = {
-
-              from,
-
-              to,
-
-              value
-
-            };
-
+          if (to.toLowerCase() === merchantAddress.toLowerCase()) {
+            verifiedPayment = { from, to, value };
             break;
-
           }
-
         } catch {
-
           continue;
-
         }
-
       }
-
-
-      /* ===================================================
-         PAYMENT EVENT REQUIRED
-         =================================================== */
 
       if (!verifiedPayment) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "No USDC transfer to the configured merchant wallet was found in this transaction."
-
-        });
-
+        return res.status(400).json({ success: false, error: "No USDC transfer to merchant wallet found." });
       }
 
+      const usdcDecimals = await usdcContract.decimals();
+      const paidUsdc = ethers.formatUnits(verifiedPayment.value, usdcDecimals);
+      const requestedPzzcUnits = ethers.parseUnits(requestedPzzc, usdcDecimals);
 
-      /* ===================================================
-         VERIFY BUYER
-         =================================================== */
-
-      if (
-        verifiedPayment.from.toLowerCase() !==
-        transaction.from.toLowerCase()
-      ) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            "USDC transfer sender does not match transaction sender."
-
-        });
-
+      if (verifiedPayment.value < requestedPzzcUnits) {
+        return res.status(400).json({ success: false, error: `Insufficient USDC payment.` });
       }
 
-
-      /* ===================================================
-         USDC DECIMALS
-         =================================================== */
-
-      const usdcDecimals =
-        await usdcContract.decimals();
-
-
-      const paidUsdc =
-        ethers.formatUnits(
-          verifiedPayment.value,
-          usdcDecimals
-        );
-
-
-      console.log(
-        "Verified USDC payment:",
-        paidUsdc
-      );
-
-
-      /* ===================================================
-         PZZC 1:1 PAYMENT CHECK
-         
-         PZZC requested must not exceed USDC paid.
-         =================================================== */
-
-      const requestedPzzcUnits =
-        ethers.parseUnits(
-          requestedPzzc,
-          usdcDecimals
-        );
-
-
-      if (
-        verifiedPayment.value <
-        requestedPzzcUnits
-      ) {
-
-        return res.status(400).json({
-
-          success: false,
-
-          error:
-            `Insufficient USDC payment. Paid ${paidUsdc} USDC but requested ${requestedPzzc} PZZC.`
-
-        });
-
+      // Transfer PZZC
+      const distributionWallet = getDistributionWallet();
+      if (distributionWallet.address.toLowerCase() !== merchantAddress.toLowerCase()) {
+        throw new Error(`STMP_B3 wallet does not match MERCHANT_WALLET.`);
       }
 
+      const pzzcContract = new ethers.Contract(process.env.STMP_PZZC, ERC20_ABI, distributionWallet);
+      const pzzcDecimals = await pzzcContract.decimals();
+      const pzzcSymbol = await pzzcContract.symbol();
+      const pzzcUnits = ethers.parseUnits(requestedPzzc, pzzcDecimals);
 
-      console.log(
-        "USDC amount is sufficient."
-      );
-
-
-      /* ===================================================
-         DISTRIBUTION WALLET
-         =================================================== */
-
-      const distributionWallet =
-        getDistributionWallet();
-
-
-      console.log(
-        "PZZC distributor:",
-        distributionWallet.address
-      );
-
-
-      /* ===================================================
-         VERIFY DISTRIBUTOR ADDRESS / MERCHANT
-         
-         This is intentionally logged rather than silently
-         assuming the private key corresponds to the
-         merchant wallet.
-         =================================================== */
-
-      if (
-        distributionWallet.address.toLowerCase() !==
-        merchantAddress.toLowerCase()
-      ) {
-
-        throw new Error(
-          `STMP_B3 wallet ${distributionWallet.address} does not match MERCHANT_WALLET ${merchantAddress}.`
-        );
-
+      const distributorBalance = await pzzcContract.balanceOf(distributionWallet.address);
+      if (distributorBalance < pzzcUnits) {
+        throw new Error(`Insufficient PZZC balance.`);
       }
 
-
-      /* ===================================================
-         PZZC CONTRACT
-         =================================================== */
-
-      const pzzcContract =
-        new ethers.Contract(
-          process.env.STMP_PZZC,
-          ERC20_ABI,
-          distributionWallet
-        );
-
-
-      /* ===================================================
-         PZZC DECIMALS
-         =================================================== */
-
-      const pzzcDecimals =
-        await pzzcContract.decimals();
-
-
-      const pzzcSymbol =
-        await pzzcContract.symbol();
-
-
-      console.log(
-        "PZZC symbol:",
-        pzzcSymbol
-      );
-
-      console.log(
-        "PZZC decimals:",
-        pzzcDecimals
-      );
-
-
-      /* ===================================================
-         PZZC AMOUNT
-         =================================================== */
-
-      const pzzcUnits =
-        ethers.parseUnits(
-          requestedPzzc,
-          pzzcDecimals
-        );
-
-
-      /* ===================================================
-         PZZC BALANCE
-         =================================================== */
-
-      const distributorBalance =
-        await pzzcContract.balanceOf(
-          distributionWallet.address
-        );
-
-
-      if (
-        distributorBalance <
-        pzzcUnits
-      ) {
-
-        throw new Error(
-          `Insufficient PZZC balance. Required ${requestedPzzc} ${pzzcSymbol}, available ${ethers.formatUnits(distributorBalance, pzzcDecimals)} ${pzzcSymbol}.`
-        );
-
+      const pzzcTransferTx = await pzzcContract.transfer(buyerAddress, pzzcUnits);
+      const pzzcReceipt = await pzzcTransferTx.wait();
+      if (!pzzcReceipt || pzzcReceipt.status !== 1) {
+        throw new Error("PZZC transfer failed.");
       }
 
-
-      console.log(
-        "PZZC balance sufficient."
-      );
-
-
-      /* ===================================================
-         GAS BALANCE
-         =================================================== */
-
-      const gasBalance =
-        await provider.getBalance(
-          distributionWallet.address
-        );
-
-
-      if (
-        gasBalance === 0n
-      ) {
-
-        throw new Error(
-          "PZZC distributor wallet has no MATIC for Polygon gas."
-        );
-
-      }
-
-
-      console.log(
-        "Distributor MATIC balance:",
-        ethers.formatEther(gasBalance)
-      );
-
-
-      /* ===================================================
-         SEND PZZC
-         =================================================== */
-
-      console.log(
-        `Sending ${requestedPzzc} ${pzzcSymbol} to ${buyerAddress}`
-      );
-
-
-      const pzzcTransferTx =
-        await pzzcContract.transfer(
-          buyerAddress,
-          pzzcUnits
-        );
-
-
-      console.log(
-        "PZZC transaction submitted:",
-        pzzcTransferTx.hash
-      );
-
-
-      /* ===================================================
-         WAIT FOR PZZC CONFIRMATION
-         =================================================== */
-
-      const pzzcReceipt =
-        await pzzcTransferTx.wait();
-
-
-      if (
-        !pzzcReceipt ||
-        pzzcReceipt.status !== 1
-      ) {
-
-        throw new Error(
-          "PZZC transfer failed or was not confirmed."
-        );
-
-      }
-
-
-      console.log(
-        "PZZC transaction confirmed:",
-        pzzcTransferTx.hash
-      );
-
-
-      /* ===================================================
-         BREVO
-         =================================================== */
-
-      const brevo =
-        getBrevoClient();
-
-
-      /* ===================================================
-         BUYER EMAIL
-         =================================================== */
-
-      const buyerEmailMessage = {
-
-        subject:
-          "🍕 Your Pizza Coin Order Confirmation",
-
-        htmlContent: `
-<!DOCTYPE html>
-<html>
-<body>
-
-<h2>🍕 Pizza Coin Order Confirmed</h2>
-
-<p>Thank you for your purchase.</p>
-
-<p>
-Your payment has been verified on Polygon.
-</p>
-
-<p>
-<b>USDC Paid:</b>
-${paidUsdc} USDC
-</p>
-
-<p>
-<b>PZZC Sent:</b>
-${requestedPzzc} ${pzzcSymbol}
-</p>
-
-<p>
-<b>PZZC Recipient:</b><br>
-${buyerAddress}
-</p>
-
-<p>
-<b>Payment Transaction:</b><br>
-${txHash}
-</p>
-
-<p>
-<b>PZZC Transaction:</b><br>
-${pzzcTransferTx.hash}
-</p>
-
-<hr>
-
-<p>
-<b>Electronic Pizza Gift Card:</b><br>
-PIZZA-GIFT-8F92-K3L9-PZZC
-</p>
-
-<p>
-Thank you for choosing Pizza Coin! 🍕
-</p>
-
-</body>
-</html>
-        `,
-
-        sender: {
-
-          name:
-            "Pizza Coin",
-
-          email:
-            process.env.SENDER_EMAIL
-
-        },
-
-        to: [
-
-          {
-
-            email:
-              email
-
-          }
-
-        ]
-
-      };
-
-
-      const buyerEmailResult =
-        await brevo.transactionalEmails.sendTransacEmail(
-          buyerEmailMessage
-        );
-
-
-      console.log(
-        "Buyer email sent:",
-        buyerEmailResult.messageId || "accepted"
-      );
-
-
-      /* ===================================================
-         SELLER EMAIL
-         =================================================== */
-
-      const sellerEmailMessage = {
-
-        subject:
-          "🍕 New Pizza Coin Order",
-
-        htmlContent: `
-<!DOCTYPE html>
-<html>
-<body>
-
-<h2>🍕 New Pizza Coin Order</h2>
-
-<p>
-<b>Buyer Email:</b>
-${email}
-</p>
-
-<p>
-<b>USDC Paid:</b>
-${paidUsdc} USDC
-</p>
-
-<p>
-<b>PZZC Sent:</b>
-${requestedPzzc} ${pzzcSymbol}
-</p>
-
-<p>
-<b>Buyer Polygon Address:</b><br>
-${buyerAddress}
-</p>
-
-<p>
-<b>Payment Transaction:</b><br>
-${txHash}
-</p>
-
-<p>
-<b>PZZC Transaction:</b><br>
-${pzzcTransferTx.hash}
-</p>
-
-</body>
-</html>
-        `,
-
-        sender: {
-
-          name:
-            "Pizza Coin",
-
-          email:
-            process.env.SENDER_EMAIL
-
-        },
-
-        to: [
-
-          {
-
-            email:
-              process.env.SELLER_EMAIL
-
-          }
-
-        ]
-
-      };
-
-
-      const sellerEmailResult =
-        await brevo.transactionalEmails.sendTransacEmail(
-          sellerEmailMessage
-        );
-
-
-      console.log(
-        "Seller email sent:",
-        sellerEmailResult.messageId || "accepted"
-      );
-
-
-      /* ===================================================
-         MARK ORDER COMPLETE
-         =================================================== */
-
-      processedOrders.set(
-        txHash,
-        {
-
-          success: true,
-
-          pzzcTxHash:
-            pzzcTransferTx.hash,
-
-          buyerEmailSent:
-            true,
-
-          sellerEmailSent:
-            true
-
-        }
-      );
-
-
-      /* ===================================================
-         SUCCESS RESPONSE
-         =================================================== */
-
-      console.log(
-        "=================================================="
-      );
-
-      console.log(
-        "ORDER COMPLETED SUCCESSFULLY"
-      );
-
-      console.log(
-        "Payment TX:",
-        txHash
-      );
-
-      console.log(
-        "PZZC TX:",
-        pzzcTransferTx.hash
-      );
-
-      console.log(
-        "Buyer email: SENT"
-      );
-
-      console.log(
-        "Seller email: SENT"
-      );
-
-      console.log(
-        "=================================================="
-      );
-
+      // Send Emails via Brevo
+      const brevo = getBrevoClient();
+
+      await brevo.transactionalEmails.sendTransacEmail({
+        subject: "🍕 Your Pizza Coin Order Confirmation",
+        htmlContent: `<p>Paid ${paidUsdc} USDC. Sent ${requestedPzzc} ${pzzcSymbol}. Tx: ${pzzcTransferTx.hash}</p>`,
+        sender: { name: "Pizza Coin", email: process.env.SENDER_EMAIL },
+        to: [{ email }]
+      });
+
+      await brevo.transactionalEmails.sendTransacEmail({
+        subject: "🍕 New Pizza Coin Order",
+        htmlContent: `<p>New order from ${email}. Paid ${paidUsdc} USDC.</p>`,
+        sender: { name: "Pizza Coin", email: process.env.SENDER_EMAIL },
+        to: [{ email: process.env.SELLER_EMAIL }]
+      });
+
+      processedOrders.set(txHash, { success: true, pzzcTxHash: pzzcTransferTx.hash });
 
       return res.status(200).json({
-
         success: true,
-
-        message:
-          "Order processed successfully.",
-
-        paymentTxHash:
-          txHash,
-
-        pzzcTxHash:
-          pzzcTransferTx.hash,
-
-        buyerEmailSent:
-          true,
-
-        sellerEmailSent:
-          true
-
+        message: "Order processed successfully.",
+        paymentTxHash: txHash,
+        pzzcTxHash: pzzcTransferTx.hash
       });
-
 
     } catch (error) {
-
-      console.error(
-        "=================================================="
-      );
-
-      console.error(
-        "ORDER PROCESSING ERROR"
-      );
-
-      console.error(
-        "Payment TX:",
-        txHash
-      );
-
-      console.error(
-        error
-      );
-
-      console.error(
-        "=================================================="
-      );
+      console.error("Direct Web3 Order Error:", error);
+      return res.status(500).json({ success: false, error: error.message || "Order processing failed." });
+    }
+  }
+);
 
 
-      return res.status(500).json({
+/* =========================================================
+   ROUTE 2: NOWPAYMENTS WEBHOOK IPN (/api/nowpayments-ipn)
+   ========================================================= */
 
-        success: false,
+app.post(
+  "/api/nowpayments-ipn",
+  async (req, res) => {
+    let paymentId = null;
 
-        error:
-          error.message ||
-          "Order processing failed.",
+    try {
+      console.log("==================================================");
+      console.log("NOWPAYMENTS IPN WEBHOOK RECEIVED");
+      console.log("==================================================");
 
-        paymentTxHash:
-          txHash || null
+      if (!process.env.NOWPAYMENTS_IPN_SECRET) {
+        throw new Error("NOWPAYMENTS_IPN_SECRET is missing from environment.");
+      }
 
+      if (!verifyNowPaymentsSignature(req)) {
+        console.warn("Invalid NOWPayments IPN signature.");
+        return res.status(400).json({ success: false, error: "Invalid signature." });
+      }
+
+      const ipnData = req.body;
+      paymentId = ipnData.payment_id;
+      const paymentStatus = ipnData.payment_status;
+      const priceAmount = ipnData.price_amount;
+      const orderDescription = ipnData.order_description || "";
+      const payCurrency = ipnData.pay_currency || "crypto";
+
+      if (paymentStatus !== "finished" && paymentStatus !== "confirmed") {
+        return res.status(200).json({ success: true, message: "IPN received, waiting for finish." });
+      }
+
+      let buyerPolygonAddress = null;
+      let buyerEmail = null;
+
+      try {
+        const walletMatch = orderDescription.match(/Wallet:\s*(0x[a-fA-F0-9]{40})/);
+        const emailMatch = orderDescription.match(/Email:\s*([^\s|]+)/);
+        if (walletMatch) buyerPolygonAddress = walletMatch[1];
+        if (emailMatch) buyerEmail = emailMatch[1];
+      } catch (err) {
+        console.error("Metadata parse error:", err);
+      }
+
+      if (!isValidAddress(buyerPolygonAddress) || !isValidEmail(buyerEmail)) {
+        return res.status(400).json({ success: false, error: "Invalid metadata payload." });
+      }
+
+      const requestedPzzc = String(priceAmount);
+
+      const existingOrder = processedOrders.get(String(paymentId));
+      if (existingOrder) {
+        return res.status(200).json({ success: true, message: "Payment already processed." });
+      }
+
+      const distributionWallet = getDistributionWallet();
+      const buyerAddress = normalizeAddress(buyerPolygonAddress);
+
+      const pzzcContract = new ethers.Contract(process.env.STMP_PZZC, ERC20_ABI, distributionWallet);
+      const pzzcDecimals = await pzzcContract.decimals();
+      const pzzcSymbol = await pzzcContract.symbol();
+      const pzzcUnits = ethers.parseUnits(requestedPzzc, pzzcDecimals);
+
+      const pzzcTransferTx = await pzzcContract.transfer(buyerAddress, pzzcUnits);
+      await pzzcTransferTx.wait();
+
+      const brevo = getBrevoClient();
+      await brevo.transactionalEmails.sendTransacEmail({
+        subject: "🍕 Your Pizza Coin Order Confirmation",
+        htmlContent: `<p>Paid $${priceAmount} USD via NOWPayments (${payCurrency}). Sent ${requestedPzzc} ${pzzcSymbol}.</p>`,
+        sender: { name: "Pizza Coin", email: process.env.SENDER_EMAIL },
+        to: [{ email: buyerEmail }]
       });
 
-    }
+      await brevo.transactionalEmails.sendTransacEmail({
+        subject: "🍕 New Pizza Coin Order (NOWPayments)",
+        htmlContent: `<p>New order from ${buyerEmail}. Paid $${priceAmount} USD.</p>`,
+        sender: { name: "Pizza Coin", email: process.env.SENDER_EMAIL },
+        to: [{ email: process.env.SELLER_EMAIL }]
+      });
 
+      processedOrders.set(String(paymentId), { success: true, pzzcTxHash: pzzcTransferTx.hash });
+
+      return res.status(200).json({ success: true, message: "IPN Order fulfilled." });
+
+    } catch (error) {
+      console.error("IPN Error:", error);
+      return res.status(500).json({ success: false, error: error.message || "IPN failed." });
+    }
   }
 );
 
 
 /* =========================================================
-   404 HANDLER
+   404 & ERROR HANDLERS
    ========================================================= */
 
-app.use(
-  (req, res) => {
+app.use((req, res) => {
+  res.status(404).json({ success: false, error: `Route not found: ${req.method} ${req.originalUrl}` });
+});
 
-    res.status(404).json({
-
-      success: false,
-
-      error:
-        `Route not found: ${req.method} ${req.originalUrl}`
-
-    });
-
-  }
-);
-
-
-/* =========================================================
-   GLOBAL ERROR HANDLER
-   ========================================================= */
-
-app.use(
-  (error, req, res, next) => {
-
-    console.error(
-      "Unhandled Express error:",
-      error
-    );
-
-    if (res.headersSent) {
-
-      return next(error);
-
-    }
-
-    res.status(500).json({
-
-      success: false,
-
-      error:
-        "Internal server error."
-
-    });
-
-  }
-);
+app.use((error, req, res, next) => {
+  console.error("Unhandled error:", error);
+  if (res.headersSent) return next(error);
+  res.status(500).json({ success: false, error: "Internal server error." });
+});
 
 
 /* =========================================================
    START SERVER
    ========================================================= */
 
-app.listen(
-  PORT,
-  () => {
-
-    console.log(
-      "=================================================="
-    );
-
-    console.log(
-      "Pizza Coin Backend"
-    );
-
-    console.log(
-      "Server is running on port:",
-      PORT
-    );
-
-    console.log(
-      "Polygon RPC:",
-      POLYGON_RPC
-    );
-
-    console.log(
-      "Merchant wallet:",
-      MERCHANT_WALLET
-    );
-
-    console.log(
-      "USDC:",
-      USDC_ADDRESS
-    );
-
-    console.log(
-      "Order endpoint:",
-      "/api/verify-usdc-order"
-    );
-
-    console.log(
-      "Health endpoint:",
-      "/api/health"
-    );
-
-    console.log(
-      "=================================================="
-    );
-
-  }
-);
+app.listen(PORT, () => {
+  console.log(`Pizza Coin Dual Backend running on port ${PORT}`);
+});
