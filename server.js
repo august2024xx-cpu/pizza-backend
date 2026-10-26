@@ -14,17 +14,14 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 
 // NOWPAYMENTS CONFIGURATION
-// Use newly rotated credentials in Render.
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY;
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET;
 const NOWPAYMENTS_API_URL = "https://api.nowpayments.io/v1";
 
-// EXISTING GOOGLE APPS SCRIPT WEB APP URL
+// GOOGLE APPS SCRIPT WEB APP URL
 const GOOGLE_APPS_SCRIPT_URL =
   "https://script.google.com/macros/s/AKfycbylr2JMpdm5hE3gKDT2euN5W5BSXV_aLB-rPMC9ehSa42P45ggPW3Ago2e4iDJqPlWWVQ/exec";
-// Reuse the existing Render BREVO_API_KEY.
-// Set Apps Script Script Property GOOGLE_SHEETS_SHARED_SECRET
-// to the exact same value.
+
 const GOOGLE_SHEETS_SHARED_SECRET = process.env.BREVO_API_KEY;
 const AFFILIATE_COMMISSION_RATE = 25;
 
@@ -175,6 +172,8 @@ async function recordVerifiedSale({
   saleStatus = "approved",
   paymentStatus = "PAID"
 }) {
+  console.log("--> TRIGGERED: recordVerifiedSale called with:", { orderId, saleAmount, affiliateId });
+
   if (
     !/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(
       GOOGLE_APPS_SCRIPT_URL
@@ -847,38 +846,16 @@ app.post("/api/nowpayments-ipn", async (req, res) => {
       message: "IPN Order fulfilled."
     });
   } catch (error) {
-    console.error("IPN Error:", error);
+    console.error("NOWPayments IPN Error:", error);
 
     return res.status(500).json({
       success: false,
-      error: error.message || "IPN failed."
+      error: error.message || "IPN processing failed."
     });
   }
 });
 
-// 404 HANDLER
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    error: `Route not found: ${req.method} ${req.originalUrl}`
-  });
-});
-
-// GENERAL ERROR HANDLER
-app.use((error, req, res, next) => {
-  console.error("Unhandled error:", error);
-
-  if (res.headersSent) {
-    return next(error);
-  }
-
-  res.status(500).json({
-    success: false,
-    error: "Internal server error."
-  });
-});
-
 // START SERVER
 app.listen(PORT, () => {
-  console.log(`Pizza Coin Dual Backend running on port ${PORT}`);
+  console.log(`Pizza Coin server running on port ${PORT}`);
 });
