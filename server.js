@@ -21,8 +21,7 @@ const NOWPAYMENTS_API_URL = "https://api.nowpayments.io/v1";
 
 // EXISTING GOOGLE APPS SCRIPT WEB APP URL
 const GOOGLE_APPS_SCRIPT_URL =
-  "https://script.google.com/macros/s/AKfycbwkVAKCKNj-PQNCIN4utpdtpZleCIuyAKwez6KOpmB36pgTWDDmkhgh_vPBBcPosTSCNQ/exec";
-
+  "https://script.google.com/macros/s/AKfycbxcmuF1j9cNaBy5hEfj00aQPcXwqppwYvMOST5qG1e8Bd5gD3xPWjGxvXED4LwPsgRDmQ/exec";
 // Reuse the existing Render BREVO_API_KEY.
 // Set Apps Script Script Property GOOGLE_SHEETS_SHARED_SECRET
 // to the exact same value.
