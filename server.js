@@ -13,24 +13,20 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// NOWPAYMENTS CONFIGURATION
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY;
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET;
 const NOWPAYMENTS_API_URL = "https://api.nowpayments.io/v1";
 
-// GOOGLE APPS SCRIPT WEB APP URL
 const GOOGLE_APPS_SCRIPT_URL =
   "https://script.google.com/macros/s/AKfycbylr2JMpdm5hE3gKDT2euN5W5BSXV_aLB-rPMC9ehSa42P45ggPW3Ago2e4iDJqPlWWVQ/exec";
 
 const GOOGLE_SHEETS_SHARED_SECRET = process.env.BREVO_API_KEY;
 const AFFILIATE_COMMISSION_RATE = 25;
 
-// POLYGON NETWORK
 const POLYGON_CHAIN_ID = 137n;
 const POLYGON_RPC =
   process.env.POLYGON_RPC || "https://polygon-rpc.com";
 
-// TOKEN AND MERCHANT WALLET
 const USDC_ADDRESS =
   "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
@@ -38,10 +34,8 @@ const MERCHANT_WALLET =
   process.env.MERCHANT_WALLET ||
   "0x9e63CDc3D66714f0FCe5B3347139E117a04A75b3";
 
-// PROVIDER
 const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
 
-// ERC-20 ABI
 const ERC20_ABI = [
   "function transfer(address to, uint256 value) returns (bool)",
   "function decimals() view returns (uint8)",
@@ -56,7 +50,6 @@ const usdcContract = new ethers.Contract(
   provider
 );
 
-// VALIDATION
 function isValidEmail(email) {
   return (
     typeof email === "string" &&
@@ -65,64 +58,13 @@ function isValidEmail(email) {
 }
 
 function isValidAddress(address) {
-  return (
-    typeof address === "string" &&
-    ethers.isAddress(address)
-  );
+  return typeof address === "string" && ethers.isAddress(address);
 }
 
 function normalizeAddress(address) {
   return ethers.getAddress(address);
 }
 
-// VERIFY NOWPAYMENTS IPN SIGNATURE
-function verifyNowPaymentsSignature(req) {
-  const receivedSig = req.headers["x-nowpayments-sig"];
-  const ipnsSecret = NOWPAYMENTS_IPN_SECRET;
-
-  if (!receivedSig || !ipnsSecret) {
-    return false;
-  }
-
-  function sortObject(obj) {
-    if (obj === null || typeof obj !== "object") {
-      return obj;
-    }
-
-    if (Array.isArray(obj)) {
-      return obj.map(sortObject);
-    }
-
-    return Object.keys(obj)
-      .sort()
-      .reduce((sorted, key) => {
-        sorted[key] = sortObject(obj[key]);
-        return sorted;
-      }, {});
-  }
-
-  const sortedPayload = sortObject(req.body);
-  const hmac = crypto.createHmac("sha512", ipnsSecret);
-  hmac.update(JSON.stringify(sortedPayload));
-
-  const calculatedSig = hmac.digest("hex");
-  const received = String(receivedSig).trim().toLowerCase();
-  const expected = String(calculatedSig).trim().toLowerCase();
-
-  if (
-    !/^[0-9a-f]{128}$/.test(received) ||
-    received.length !== expected.length
-  ) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(
-    Buffer.from(expected, "utf8"),
-    Buffer.from(received, "utf8")
-  );
-}
-
-// REQUIRED ENVIRONMENT VARIABLES
 function checkEnvironment() {
   const required = [
     "STMP_B3",
@@ -134,14 +76,13 @@ function checkEnvironment() {
 
   const missing = required.filter(key => !process.env[key]);
 
-  if (missing.length > 0) {
+  if (missing.length) {
     throw new Error(
       `Missing Render environment variables: ${missing.join(", ")}`
     );
   }
 }
 
-// DISTRIBUTION WALLET
 function getDistributionWallet() {
   if (!process.env.STMP_B3) {
     throw new Error("STMP_B3 private key is missing.");
@@ -150,7 +91,6 @@ function getDistributionWallet() {
   return new ethers.Wallet(process.env.STMP_B3, provider);
 }
 
-// BREVO EMAIL CLIENT
 function getBrevoClient() {
   if (!process.env.BREVO_API_KEY) {
     throw new Error("BREVO_API_KEY is missing.");
@@ -163,53 +103,111 @@ function getBrevoClient() {
   });
 }
 
-// GOOGLE SHEETS VERIFIED-SALE REPORTING
+/* =========================================================
+   GOOGLE SHEETS VERIFIED-SALE REPORTING
+   ========================================================= */
+
 async function recordVerifiedSale({
   orderId,
   paymentMethod,
   affiliateId,
   saleAmount,
+  buyerEmail = "",
+  buyerWallet = "",
+  buyerReceiveWallet = "",
+  mainSellerWallet = MERCHANT_WALLET,
+  sellerWallet = "",
+  txHash = "",
+  pzzcTxHash = "",
+  pzzcSent = "",
   saleStatus = "approved",
   paymentStatus = "PAID"
 }) {
-  console.log("--> TRIGGERED: recordVerifiedSale called with:", { orderId, saleAmount, affiliateId });
-
   if (
     !/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(
       GOOGLE_APPS_SCRIPT_URL
     )
   ) {
-    console.error("Invalid Google Apps Script /exec URL.");
-    return { ok: false, skipped: true };
+    console.error("Invalid Google Apps Script Web App URL.");
+    return { ok: false };
   }
 
-  const amount = Number(saleAmount);
-
-  if (!Number.isFinite(amount) || amount <= 0) {
-    console.error("Invalid sale amount; not reporting sale.");
-    return { ok: false, skipped: true };
+  if (
+    !Number.isFinite(Number(AFFILIATE_COMMISSION_RATE)) ||
+    AFFILIATE_COMMISSION_RATE < 0 ||
+    AFFILIATE_COMMISSION_RATE > 100
+  ) {
+    console.error("Invalid affiliate commission rate.");
+    return { ok: false };
   }
 
-  const suppliedAffiliate = String(affiliateId || "").trim();
-
-  const normalizedAffiliateId = isValidAddress(suppliedAffiliate)
-    ? normalizeAddress(suppliedAffiliate)
+  const normalizedAffiliateId = isValidAddress(
+    String(affiliateId || "").trim()
+  )
+    ? normalizeAddress(String(affiliateId).trim())
     : "MAIN";
+
+  const normalizedMainSellerWallet = isValidAddress(
+    String(mainSellerWallet || "").trim()
+  )
+    ? normalizeAddress(String(mainSellerWallet).trim())
+    : String(mainSellerWallet || "");
+
+  const normalizedSellerWallet = isValidAddress(
+    String(sellerWallet || "").trim()
+  )
+    ? normalizeAddress(String(sellerWallet).trim())
+    : normalizedAffiliateId === "MAIN"
+      ? normalizedMainSellerWallet
+      : normalizedAffiliateId;
+
+  const normalizedBuyerWallet = isValidAddress(
+    String(buyerWallet || "").trim()
+  )
+    ? normalizeAddress(String(buyerWallet).trim())
+    : String(buyerWallet || "");
+
+  const normalizedBuyerReceiveWallet = isValidAddress(
+    String(buyerReceiveWallet || "").trim()
+  )
+    ? normalizeAddress(String(buyerReceiveWallet).trim())
+    : String(buyerReceiveWallet || "");
 
   const payload = {
     action: "recordSale",
-    orderId: String(orderId),
-    paymentMethod: String(paymentMethod),
+    timestamp: new Date().toISOString(),
+    orderId: String(orderId || ""),
+    paymentMethod: String(paymentMethod || ""),
     affiliateId: normalizedAffiliateId,
-    saleAmount: amount,
+    saleAmount: Number(saleAmount),
     commissionRate:
       normalizedAffiliateId === "MAIN"
         ? 0
         : AFFILIATE_COMMISSION_RATE,
     saleStatus,
     paymentStatus,
+    buyerEmail: String(buyerEmail || ""),
+    buyerWallet: normalizedBuyerWallet,
+    buyerReceiveWallet: normalizedBuyerReceiveWallet,
+    mainSellerWallet: normalizedMainSellerWallet,
+    sellerWallet: normalizedSellerWallet,
+    txHash: String(txHash || ""),
+    pzzcTxHash: String(pzzcTxHash || ""),
+    pzzcSent: String(pzzcSent || ""),
     sharedSecret: GOOGLE_SHEETS_SHARED_SECRET || ""
   };
+
+  if (
+    !payload.orderId ||
+    !Number.isFinite(payload.saleAmount) ||
+    payload.saleAmount <= 0
+  ) {
+    console.error("Invalid sale report data.", {
+      orderId: payload.orderId,
+      saleAmount: payload.saleAmount
+    });
+    return { ok: false };
+  }
 
   let lastError;
 
@@ -225,7 +223,6 @@ async function recordVerifiedSale({
       });
 
       const responseText = await response.text();
-
       let result;
 
       try {
@@ -245,6 +242,12 @@ async function recordVerifiedSale({
 
       console.log("Verified sale reported to Google Sheets:", {
         orderId: payload.orderId,
+        paymentMethod: payload.paymentMethod,
+        buyerEmail: payload.buyerEmail,
+        buyerWallet: payload.buyerWallet,
+        buyerReceiveWallet: payload.buyerReceiveWallet,
+        sellerWallet: payload.sellerWallet,
+        saleAmount: payload.saleAmount,
         duplicate: Boolean(result.duplicate)
       });
 
@@ -254,9 +257,8 @@ async function recordVerifiedSale({
       };
     } catch (error) {
       lastError = error;
-
       console.error(
-        `Google Sheets sale-report attempt ${attempt}/3 failed:`,
+        `Google Sheets attempt ${attempt}/3 failed:`,
         error.message
       );
 
@@ -271,21 +273,66 @@ async function recordVerifiedSale({
   console.error(
     "CRITICAL: verified sale was not recorded in Google Sheets.",
     {
-      orderId: String(orderId),
-      error: lastError ? lastError.message : "Unknown error"
+      orderId: payload.orderId,
+      error: lastError?.message || "Unknown error"
     }
   );
 
   return {
     ok: false,
-    error: lastError ? lastError.message : "Unknown error"
+    error: lastError?.message || "Unknown error"
   };
 }
 
-// IN-MEMORY DUPLICATE-ORDER GUARD
+/* =========================================================
+   NOWPAYMENTS SIGNATURE VERIFICATION
+   ========================================================= */
+
+function verifyNowPaymentsSignature(req) {
+  const receivedSig = req.headers["x-nowpayments-sig"];
+
+  if (!receivedSig || !NOWPAYMENTS_IPN_SECRET) {
+    return false;
+  }
+
+  function sortObject(obj) {
+    if (obj === null || typeof obj !== "object") return obj;
+    if (Array.isArray(obj)) return obj.map(sortObject);
+
+    return Object.keys(obj)
+      .sort()
+      .reduce((sorted, key) => {
+        sorted[key] = sortObject(obj[key]);
+        return sorted;
+      }, {});
+  }
+
+  const sortedPayload = sortObject(req.body);
+  const hmac = crypto.createHmac("sha512", NOWPAYMENTS_IPN_SECRET);
+  hmac.update(JSON.stringify(sortedPayload));
+
+  const expected = hmac.digest("hex").toLowerCase();
+  const received = String(receivedSig).trim().toLowerCase();
+
+  if (
+    !/^[0-9a-f]{128}$/.test(received) ||
+    received.length !== expected.length
+  ) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    Buffer.from(expected, "utf8"),
+    Buffer.from(received, "utf8")
+  );
+}
+
 const processedOrders = new Map();
 
-// HEALTH CHECK
+/* =========================================================
+   HEALTH CHECK AND ROOT
+   ========================================================= */
+
 app.get("/api/health", async (req, res) => {
   try {
     const network = await provider.getNetwork();
@@ -311,20 +358,21 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-// ROOT
 app.get("/", (req, res) => {
   res.status(200).send(
     "Pizza Coin Dual Backend is running successfully!"
   );
 });
 
-// DIRECT WEB3 USDC ORDER
+/* =========================================================
+   DIRECT WEB3 USDC ORDER
+   ========================================================= */
+
 app.post("/api/verify-usdc-order", async (req, res) => {
   let txHash = null;
 
   try {
     console.log("VERIFY USDC ORDER REQUEST");
-
     checkEnvironment();
 
     const {
@@ -443,9 +491,7 @@ app.post("/api/verify-usdc-order", async (req, res) => {
           data: log.data
         });
 
-        if (!parsed || parsed.name !== "Transfer") {
-          continue;
-        }
+        if (!parsed || parsed.name !== "Transfer") continue;
 
         const from = normalizeAddress(parsed.args[0]);
         const to = normalizeAddress(parsed.args[1]);
@@ -504,7 +550,6 @@ app.post("/api/verify-usdc-order", async (req, res) => {
 
     const pzzcDecimals = await pzzcContract.decimals();
     const pzzcSymbol = await pzzcContract.symbol();
-
     const pzzcUnits = ethers.parseUnits(
       requestedPzzc,
       pzzcDecimals
@@ -541,6 +586,16 @@ app.post("/api/verify-usdc-order", async (req, res) => {
       paymentMethod: "USDC (Polygon)",
       affiliateId,
       saleAmount: Number(paidUsdc),
+      buyerEmail: email,
+      buyerWallet: verifiedPayment.from,
+      buyerReceiveWallet: buyerAddress,
+      mainSellerWallet: merchantAddress,
+      sellerWallet: isValidAddress(affiliateId)
+        ? normalizeAddress(affiliateId)
+        : merchantAddress,
+      txHash,
+      pzzcTxHash: pzzcTransferTx.hash,
+      pzzcSent: requestedPzzc,
       saleStatus: "approved",
       paymentStatus: "PAID"
     });
@@ -585,17 +640,15 @@ app.post("/api/verify-usdc-order", async (req, res) => {
   }
 });
 
-// NOWPAYMENTS INVOICE
+/* =========================================================
+   NOWPAYMENTS INVOICE CREATION
+   ========================================================= */
+
 app.post("/api/create-nowpayments-invoice", async (req, res) => {
   try {
     checkEnvironment();
 
-    const {
-      email,
-      polygonAddress,
-      pzzcAmount,
-      affiliateId
-    } = req.body;
+    const { email, polygonAddress, pzzcAmount, affiliateId } = req.body;
 
     if (!isValidEmail(email)) {
       return res.status(400).json({
@@ -645,8 +698,7 @@ app.post("/api/create-nowpayments-invoice", async (req, res) => {
             "https://pizza-backend-8if7.onrender.com/api/nowpayments-ipn",
           order_id: `PZZC-${crypto.randomUUID()}`,
           order_description:
-            `Wallet: ${normalizeAddress(polygonAddress)} | ` +
-            `Email: ${email} | Affiliate ID: ${safeAffiliateId}`
+            `Wallet: ${normalizeAddress(polygonAddress)} | Email: ${email} | Affiliate ID: ${safeAffiliateId}`
         })
       }
     );
@@ -673,16 +725,15 @@ app.post("/api/create-nowpayments-invoice", async (req, res) => {
   }
 });
 
-// NOWPAYMENTS PAYMENT WEBHOOK
+/* =========================================================
+   NOWPAYMENTS IPN WEBHOOK
+   ========================================================= */
+
 app.post("/api/nowpayments-ipn", async (req, res) => {
   try {
     console.log("NOWPAYMENTS IPN WEBHOOK RECEIVED");
 
     if (!NOWPAYMENTS_IPN_SECRET) {
-      console.error(
-        "NOWPAYMENTS_IPN_SECRET is missing from Render."
-      );
-
       return res.status(500).json({
         success: false,
         error: "IPN secret is not configured."
@@ -699,7 +750,6 @@ app.post("/api/nowpayments-ipn", async (req, res) => {
     }
 
     const ipnData = req.body;
-
     const paymentId =
       ipnData.payment_id ||
       ipnData.invoice_id ||
@@ -738,13 +788,8 @@ app.post("/api/nowpayments-ipn", async (req, res) => {
       /Affiliate ID:\s*(0x[a-fA-F0-9]{40})/i
     );
 
-    if (walletMatch) {
-      buyerPolygonAddress = walletMatch[1];
-    }
-
-    if (emailMatch) {
-      buyerEmail = emailMatch[1];
-    }
+    if (walletMatch) buyerPolygonAddress = walletMatch[1];
+    if (emailMatch) buyerEmail = emailMatch[1];
 
     if (
       affiliateMatch &&
@@ -763,9 +808,7 @@ app.post("/api/nowpayments-ipn", async (req, res) => {
       });
     }
 
-    const existingOrder = processedOrders.get(String(paymentId));
-
-    if (existingOrder) {
+    if (processedOrders.has(String(paymentId))) {
       return res.status(200).json({
         success: true,
         message: "Payment already processed."
@@ -812,6 +855,16 @@ app.post("/api/nowpayments-ipn", async (req, res) => {
       paymentMethod: `NOWPayments (${payCurrency})`,
       affiliateId,
       saleAmount: Number(priceAmount),
+      buyerEmail,
+      buyerWallet: "",
+      buyerReceiveWallet: buyerAddress,
+      mainSellerWallet: MERCHANT_WALLET,
+      sellerWallet: isValidAddress(affiliateId)
+        ? normalizeAddress(affiliateId)
+        : MERCHANT_WALLET,
+      txHash: String(paymentId || ""),
+      pzzcTxHash: pzzcTransferTx.hash,
+      pzzcSent: String(priceAmount),
       saleStatus: "approved",
       paymentStatus: "PAID"
     });
@@ -821,8 +874,7 @@ app.post("/api/nowpayments-ipn", async (req, res) => {
     await brevo.transactionalEmails.sendTransacEmail({
       subject: "🍕 Your Pizza Coin Order Confirmation",
       htmlContent:
-        `<p>Paid $${priceAmount} USD via NOWPayments (${payCurrency}). ` +
-        `Sent ${priceAmount} ${pzzcSymbol}.</p>`,
+        `<p>Paid $${priceAmount} USD via NOWPayments (${payCurrency}). Sent ${priceAmount} ${pzzcSymbol}.</p>`,
       sender: {
         name: "Pizza Coin",
         email: process.env.SENDER_EMAIL
@@ -846,16 +898,37 @@ app.post("/api/nowpayments-ipn", async (req, res) => {
       message: "IPN Order fulfilled."
     });
   } catch (error) {
-    console.error("NOWPayments IPN Error:", error);
+    console.error("IPN Error:", error);
 
     return res.status(500).json({
       success: false,
-      error: error.message || "IPN processing failed."
+      error: error.message || "IPN failed."
     });
   }
 });
 
-// START SERVER
+/* =========================================================
+   ERROR HANDLERS
+   ========================================================= */
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: `Route not found: ${req.method} ${req.originalUrl}`
+  });
+});
+
+app.use((error, req, res, next) => {
+  console.error("Unhandled error:", error);
+
+  if (res.headersSent) return next(error);
+
+  res.status(500).json({
+    success: false,
+    error: "Internal server error."
+  });
+});
+
 app.listen(PORT, () => {
-  console.log(`Pizza Coin server running on port ${PORT}`);
+  console.log(`Pizza Coin Dual Backend running on port ${PORT}`);
 });
