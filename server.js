@@ -1,4 +1,3 @@
-
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -29,15 +28,14 @@ const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY;
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET;
 const NOWPAYMENTS_API_URL = "https://api.nowpayments.io/v1";
 
-// Google Apps Script Web App URL ending in /exec.
-// Hardcoded here so affiliate tracking does not require a new Render variable.
+// Google Apps Script Web App URL ending in /exec (Updated to active deployment endpoint).
 const GOOGLE_APPS_SCRIPT_URL =
-  "https://script.google.com/macros/s/AKfycbylr2JMpdm5hE3gKDT2euN5W5BSXV_aLB-rPMC9ehSa42P45ggPW3Ago2e4iDJqPlWWVQ/exec";
+  "https://script.google.com/macros/s/AKfycbwkVAKCKNj-PQNCIN4utpdtpZleCIuyAKwez6KOpmB36pgTWDDmkhgh_vPBBcPosTSCNQ/exec";
 
-// Reuses an existing Render secret instead of adding a new Render variable.
-// In Apps Script Project Settings > Script Properties, set
-// GOOGLE_SHEETS_SHARED_SECRET to the exact value of your existing BREVO_API_KEY.
-const GOOGLE_SHEETS_SHARED_SECRET = process.env.BREVO_API_KEY;
+// Shared secret matching Script Properties GOOGLE_SHEETS_SHARED_SECRET1
+const GOOGLE_SHEETS_SHARED_SECRET =
+  process.env.GOOGLE_SHEETS_SHARED_SECRET1 || "PizzaCoinSheetSecret202611";
+
 const AFFILIATE_COMMISSION_RATE = 25;
 
 
